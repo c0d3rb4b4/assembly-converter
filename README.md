@@ -1,5 +1,5 @@
 # assembly-converter
-A utility to convert chromosome coordinates from one assembly to another.
+A utility to convert chromosome coordinates between different assemblies
 
 ## Usage
     perl ./assembly-converter [OPTIONS] CHROM CHROM_START CHROM_END
@@ -16,7 +16,7 @@ Or batch convert all chromosome coordinates specified in INFILE in BED format.
     -v,  --verbose        set log level to INFO
     -vv, --debug          set log level to DEBUG
     -h,  --help           display this help and exit
-  
+
 ## Examples
     perl ./assembly-converter -s GRCh38 -t GRCh37 10 3770000 3790000
 converts chromosome 10 from 3770000 to 3790000 from GRCh38 format to GRCh37

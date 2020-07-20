@@ -1,8 +1,8 @@
 #!/usr/local/bin/perl
 =head1 NAME
 
-assembly-converter - A utility to convert chromosome coordinates from
-one assembly to another.
+assembly-converter - A utility to convert chromosome coordinates between
+different assemblies (such as GRCh37=>GRCh38)
 
 =head1 USAGE
     perl ./assembly-converter [OPTIONS] CHROM CHROM_START CHROM_END
@@ -46,6 +46,9 @@ use ChromosomeCoordinates;
 use OutChromosomeCoordinates;
 
 # Constants
+use constant REGISTRY       => 'Bio::EnsEMBL::Registry';
+use constant ENSEMBL_HOST   => 'ensembldb.ensembl.org';
+use constant ENSEMBL_USER   => 'anonymous';
 use constant SPECIES        => 'Human';
 use constant GROUP          => 'Core';
 use constant SLICE_TYPE     => 'Slice';
@@ -61,6 +64,7 @@ Readonly my $DEFAULT_FORMAT => 'JSON';
 # log level
 my $log_level = ERROR;
 
+# print help
 sub help {
   print "Usage:\tperl $0 [OPTIONS] CHROM CHROM_START CHROM_END\n";
   print "  or:\tperl $0 [OPTIONS] -i INFILE\n";
@@ -97,6 +101,7 @@ sub commify_series {
                 join("$sepchar ", @_[0 .. ($#_-1)], "and $_[-1]");
 }
 
+# basic logging
 sub local_log {
   my $level   = shift;
   my $message = shift;
@@ -111,6 +116,7 @@ sub local_log {
   }
 }
 
+# helper to get json from array
 sub get_json_from_array {
   my @aoh = @_;
   my $json = JSON::PP->new->convert_blessed;
@@ -118,15 +124,16 @@ sub get_json_from_array {
   return $object_json;
 }
 
+# print in BED format: chr1  213941196  213942363
 sub print_bed_output {
   my ($file_handle, @mappings) = @_;
   foreach my $mapping ( @mappings ) {
     my $mapped = $mapping->{mapped};
-    # print in BED format: chr1  213941196  213942363
     print $file_handle $mapped->get_name() . " " . $mapped->get_start() . " " . $mapping->{mapped}->get_end() . "\n";
   }
 }
 
+# print in JSON format. include original and mapped values
 sub print_json_output {
   my ($file_handle, @mappings) = @_;
   print $file_handle get_json_from_array(@mappings) . "\n";
@@ -143,6 +150,7 @@ sub print_output {
   }
 }
 
+# read the input file to get coordinates
 sub get_chromosome_coordinates_from_file {
   my $infile = shift;
 
@@ -159,6 +167,7 @@ sub get_chromosome_coordinates_from_file {
   return @ccs_list;
 }
 
+# main
 sub main {
   GetOptions(
     'source|s=s'      => \( my $source_assembly = 'GRCh37' ),
@@ -236,12 +245,12 @@ sub main {
 }
 
 sub connect_ensembl {
-  my $registry = 'Bio::EnsEMBL::Registry';
+  my $registry = REGISTRY;
   local_log(INFO, "Connecting to ensembl server");
 
   $registry->load_registry_from_db(
-    -host => 'ensembldb.ensembl.org',
-    -user => 'anonymous',
+    -host => ENSEMBL_HOST,
+    -user => ENSEMBL_USER,
   );
   local_log(INFO, "Connected");
   return $registry;
@@ -253,8 +262,10 @@ sub convert_assembly {
   my $slice_adaptor = $registry->get_adaptor(SPECIES, GROUP, SLICE_TYPE);
   my $slice = $slice_adaptor->fetch_by_region(CHROMOSOME, $ccs->get_name(), $ccs->get_start(), $ccs->get_end(), undef, $source_assembly);
 
+  # project slice to target assembly
   my $projection = $slice->project(CHROMOSOME, $target_assembly);
 
+  # for each segment find mappings
   my @new_ccs_list;
   foreach my $segment (@$projection) {
     my $new_slice = $segment->to_Slice();
@@ -278,7 +289,10 @@ sub convert_assembly {
       );
     push @new_ccs_list, \%mapping;
   }
+
+  # return the complete list of mappings
   return @new_ccs_list;
 }
 
+# call main
 main();

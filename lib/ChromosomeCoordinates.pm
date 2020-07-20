@@ -1,4 +1,13 @@
 #!/usr/local/bin/perl
+=head1 NAME
+
+ChromosomeCoordinates - Coordinates on a chromosome.
+
+=head1 SYNOPSIS
+
+    my $chromosome_coordinates = new ChromosomeCoordinates(10, 10000, 30000);
+
+=cut
 use strict;
 use warnings;
 
