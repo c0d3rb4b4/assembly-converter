@@ -1,0 +1,284 @@
+#!/usr/local/bin/perl
+=head1 NAME
+
+assembly-converter - A utility to convert chromosome coordinates from
+one assembly to another.
+
+=head1 USAGE
+    perl ./assembly-converter [OPTIONS] CHROM CHROM_START CHROM_END
+    perl ./assembly-converter [OPTIONS] -i INFILE
+Convert coordinates on chromosome CHROM from CHROM_START to CHROM_END from one assembly to same region in another.
+Or batch convert all chromosome coordinates specified in INFILE in BED format.
+
+  -s,  --source         the source assembly. Default='GRCh37'
+  -t,  --target         the target assembly. Default='GRCh38'
+  -i,  --infile         the input file in BED format
+  -o,  --outfile        the output file path. If not given, output is printed to console
+  -f,  --outformat      format of the output. Accepted values: BED and JSON. Default: JSON
+  -q,  --quite          set log level to ERROR
+  -v,  --verbose        set log level to INFO
+  -vv, --debug          set log level to DEBUG
+  -h,  --help           display this help and exit
+
+=head1 EXAMPLES
+
+perl ./assembly-converter -s GRCh38 -t GRCh37 10 3770000 3790000
+  converts chromosome 10 from 3770000 to 3790000 from GRCh38 format to GRCh37
+
+perl ./assembly-converter 10 25000 30000
+  converts chromosome 10 from 25000 to 30000 from GRCh37 format to GRCh38
+
+perl ./assembly-converter -f JSON -i test.bed
+  converts coordinates given in input BED file "test.bed" and writes output to console in JSON
+
+=cut
+
+use strict;
+use warnings;
+use Getopt::Long;
+use JSON::PP;
+use Bio::EnsEMBL::Registry;
+use Readonly;
+use Scalar::Util qw(dualvar);
+
+use lib 'lib';
+use ChromosomeCoordinates;
+use OutChromosomeCoordinates;
+
+# Constants
+use constant SPECIES        => 'Human';
+use constant GROUP          => 'Core';
+use constant SLICE_TYPE     => 'Slice';
+use constant CHROMOSOME     => 'chromosome';
+use constant DEBUG          => dualvar 0, "DEBUG";
+use constant INFO           => dualvar 1, "INFO";
+use constant ERROR          => dualvar 2, "ERROR";
+
+# Readonly variables
+Readonly my @OUT_FORMATS    => ('BED', 'JSON');
+Readonly my $DEFAULT_FORMAT => 'JSON';
+
+# log level
+my $log_level = ERROR;
+
+sub help {
+  print "Usage:\tperl $0 [OPTIONS] CHROM CHROM_START CHROM_END\n";
+  print "  or:\tperl $0 [OPTIONS] -i INFILE\n";
+  print "Convert coordinates on chromosome CHROM from CHROM_START to CHROM_END from one assembly to same region in another.\n";
+  print "Or batch convert all chromosome coordinates specified in INFILE in BED format.\n";
+  print "\n";
+  print "  -s,  --source\t\tthe source assembly. Default='GRCh37'\n";
+  print "  -t,  --target\t\tthe target assembly. Default='GRCh38'\n";
+  print "  -i,  --infile\t\tthe input file in BED format\n";
+  print "  -o,  --outfile\t\tthe output file path. If not given, output is printed to console\n";
+  print "  -f,  --outformat\tformat of the output. Accepted values: ", commify_series(@OUT_FORMATS), ". Default: $DEFAULT_FORMAT\n";
+  print "  -q,  --quite\t\tset log level to ERROR\n";
+  print "  -v,  --verbose\t\tset log level to INFO\n";
+  print "  -vv, --debug\t\tset log level to DEBUG\n";
+  print "  -h,  --help\t\tdisplay this help and exit\n";
+  print "\n";
+  print "Examples:\n";
+  print "perl $0 -s GRCh38 -t GRCh37 10 3770000 3790000\n";
+  print "  converts chromosome 10 from 3770000 to 3790000 from GRCh38 format to GRCh37\n\n";
+  print "perl $0 10 25000 30000\n";
+  print "  converts chromosome 10 from 25000 to 30000 from GRCh37 format to GRCh38\n\n";
+  print "perl $0 -f JSON -i test.bed\n";
+  print "  converts coordinates given in input BED file \"test.bed\" and writes output to console in JSON\n\n";
+
+  exit
+}
+
+# helper
+sub commify_series {
+    my $sepchar = grep(/,/ => @_) ? ";" : ",";
+    (@_ == 0) ? ''                                      :
+    (@_ == 1) ? $_[0]                                   :
+    (@_ == 2) ? join(" and ", @_)                       :
+                join("$sepchar ", @_[0 .. ($#_-1)], "and $_[-1]");
+}
+
+sub local_log {
+  my $level   = shift;
+  my $message = shift;
+
+  my $calling_function = (caller(1))[3];
+  if ($level >= $log_level) {
+    my $file_handle = \*STDOUT;
+    if ($level >= ERROR) {
+      $file_handle = \*STDERR;
+    }
+    print $file_handle "$level $calling_function: ", $message, "\n";
+  }
+}
+
+sub get_json_from_array {
+  my @aoh = @_;
+  my $json = JSON::PP->new->convert_blessed;
+  my $object_json = $json->encode(\@aoh);
+  return $object_json;
+}
+
+sub print_bed_output {
+  my ($file_handle, @mappings) = @_;
+  foreach my $mapping ( @mappings ) {
+    my $mapped = $mapping->{mapped};
+    # print in BED format: chr1  213941196  213942363
+    print $file_handle $mapped->get_name() . " " . $mapped->get_start() . " " . $mapping->{mapped}->get_end() . "\n";
+  }
+}
+
+sub print_json_output {
+  my ($file_handle, @mappings) = @_;
+  print $file_handle get_json_from_array(@mappings) . "\n";
+}
+
+sub print_output {
+  my ($file_handle, $format, @mappings) = @_;
+  if ($format eq "JSON") {
+    print_json_output($file_handle, @mappings);
+  } elsif ($format eq "BED") {
+    print_bed_output($file_handle, @mappings);
+  } else {
+    #log error here
+  }
+}
+
+sub get_chromosome_coordinates_from_file {
+  my $infile = shift;
+
+  my @ccs_list;
+  open(INFILE, '<', $infile) or die $!;
+  while(<INFILE>){
+    my $line_str = $_;
+    $line_str =~ s/^\s+|\s+$//g;
+    my @line = split(/\s+/, $line_str, 3);
+    my $chromosome_coordinates = new ChromosomeCoordinates($line[0], int($line[1]), int($line[2]));
+    push @ccs_list, $chromosome_coordinates;
+  }
+  close(INFILE);
+  return @ccs_list;
+}
+
+sub main {
+  GetOptions(
+    'source|s=s'      => \( my $source_assembly = 'GRCh37' ),
+    'target|t=s'      => \( my $target_assembly = 'GRCh38' ),
+    'infile|i=s'      => \( my $infile = undef ),
+    'outfile|o=s'     => \( my $outfile = undef ),
+    'outformat|f=s'   => \( my $outformat = $DEFAULT_FORMAT ),
+    'quiet|q'         => \( my $quiet = undef ),
+    'verbose|v'       => \( my $verbose = undef ),
+    'debug|vv'        => \( my $debug = undef ),
+    'help|h'          => \( my $print_help = undef ),
+  );
+
+  # input validations
+  help() if $print_help;
+  unless ( grep { $_ eq $outformat } @OUT_FORMATS ) {
+    local_log(ERROR, "Invalid format specified");
+    help();
+  }
+
+  # set log level
+  if ($quiet) {
+    $log_level = ERROR;
+  }
+  if ($verbose) {
+    $log_level = INFO;
+  }
+  if ($debug) {
+    $log_level = DEBUG;
+  }
+
+  local_log(INFO, "SOURCE_ASSEMBLY: $source_assembly");
+  local_log(INFO, "TARGET_ASSEMBLY: $target_assembly");
+
+  # Get input chromosome coordinates
+  my @ccs_list;
+  if ((($#ARGV + 1) != 3) && (!$infile)) {
+    # no file provided and parameter count incorrect
+    local_log(ERROR, "Invalid input");
+    help();
+  } elsif (!$infile) {
+    # coordinates given directly in command
+    my $chromosome_coordinates = new ChromosomeCoordinates($ARGV[0], int($ARGV[1]), int($ARGV[2]));
+    push @ccs_list, $chromosome_coordinates;
+  } else {
+    # input BED file given
+    my @chromosome_coordinates_list = &get_chromosome_coordinates_from_file($infile);
+    push @ccs_list, @chromosome_coordinates_list;
+  }
+  local_log(INFO, "Input: " . get_json_from_array(@ccs_list));
+
+  # connect to ensembl server
+  my $registry = connect_ensembl();
+
+  # convert all coordinates
+  my @all_mappings;
+  foreach my $ccs ( @ccs_list ) {
+    my @returned_mappings = &convert_assembly($registry, $ccs, $source_assembly, $target_assembly);
+    push(@all_mappings, @returned_mappings);
+  }
+  local_log(INFO, get_json_from_array(@all_mappings));
+
+  # write output
+  my $file_handle;
+  if ($outfile) {
+    open(FH, '>', $outfile) or die $!;
+    $file_handle = \*FH;
+  } else {
+    $file_handle = \*STDOUT;
+  }
+  print_output($file_handle, $outformat, @all_mappings);
+  if ($outfile) {
+    close(FH);
+  }
+}
+
+sub connect_ensembl {
+  my $registry = 'Bio::EnsEMBL::Registry';
+  local_log(INFO, "Connecting to ensembl server");
+
+  $registry->load_registry_from_db(
+    -host => 'ensembldb.ensembl.org',
+    -user => 'anonymous',
+  );
+  local_log(INFO, "Connected");
+  return $registry;
+}
+
+sub convert_assembly {
+  my ( $registry, $ccs, $source_assembly, $target_assembly ) = @_;
+  # Fetch the slice adaptor and slice
+  my $slice_adaptor = $registry->get_adaptor(SPECIES, GROUP, SLICE_TYPE);
+  my $slice = $slice_adaptor->fetch_by_region(CHROMOSOME, $ccs->get_name(), $ccs->get_start(), $ccs->get_end(), undef, $source_assembly);
+
+  my $projection = $slice->project(CHROMOSOME, $target_assembly);
+
+  my @new_ccs_list;
+  foreach my $segment (@$projection) {
+    my $new_slice = $segment->to_Slice();
+    my %mapping = (
+      'original' => new OutChromosomeCoordinates(
+          $slice->seq_region_name(),
+          int($slice->start() + $segment->from_start() - 1),
+          int($slice->start() + $segment->from_end() - 1),
+          $slice->strand(),
+          $slice->coord_system->name(),
+          $slice->coord_system->version()
+        ),
+      'mapped' => new OutChromosomeCoordinates(
+          $new_slice->seq_region_name(),
+          $new_slice->start(),
+          $new_slice->end(),
+          $new_slice->strand(),
+          $new_slice->coord_system->name(),
+          $new_slice->coord_system->version()
+        )
+      );
+    push @new_ccs_list, \%mapping;
+  }
+  return @new_ccs_list;
+}
+
+main();
